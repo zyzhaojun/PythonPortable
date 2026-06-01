@@ -9,9 +9,20 @@ import time
 import traceback
 from pathlib import Path
 
-import matplotlib
+# matplotlib / pandas / numpy are imported lazily, only when the student's code
+# actually needs them. Importing them on every run made trivial programs (print,
+# input, simple math) pay matplotlib's heavy import plus its one-time font-cache
+# build, which stalled old classroom PCs for minutes. The plotting backend is
+# pinned to the non-GUI "Agg" via the environment so a later
+# "import matplotlib.pyplot" in student code still renders to PNG headlessly.
+os.environ.setdefault("MPLBACKEND", "Agg")
 
-matplotlib.use("Agg")
+
+PLOTTING_TOKENS = ("matplotlib", "pylab", "seaborn")
+
+
+def code_uses_plotting(source: str) -> bool:
+    return any(token in source for token in PLOTTING_TOKENS)
 
 
 def configure_standard_streams() -> None:
@@ -68,7 +79,15 @@ def main(argv: list[str] | None = None) -> int:
     input_counter = 0
     interactive_state_path = os.environ.get("PYTHONTEACHING_INTERACTIVE_STATE")
     echo_interactive_input = os.environ.get("PYTHONTEACHING_ECHO_INPUT") == "1"
-    configure_chinese_fonts()
+    # Only touch matplotlib (and its costly font-cache build) when the code
+    # actually plots; print/input/loops lessons skip it entirely.
+    if code_uses_plotting(source):
+        try:
+            configure_chinese_fonts()
+        except Exception:
+            # A font-setup hiccup must never abort the student's program;
+            # the plot can still render with a fallback font.
+            pass
 
     def write_interactive_state(waiting: bool, prompt: str = "", request_id: str = "") -> None:
         if not interactive_state_path:
@@ -104,37 +123,38 @@ def main(argv: list[str] | None = None) -> int:
         if value is None:
             return
 
-        try:
-            import pandas as pd
+        pandas = sys.modules.get("pandas")
+        if pandas is not None:
+            try:
+                if isinstance(value, (pandas.DataFrame, pandas.Series)):
+                    outputs.append(
+                        {
+                            "type": "html",
+                            "html": value.to_html(
+                                border=0,
+                                classes="data-frame",
+                                max_rows=40,
+                                max_cols=12,
+                                notebook=False,
+                            ),
+                        }
+                    )
+                    return
+            except Exception:
+                pass
 
-            if isinstance(value, (pd.DataFrame, pd.Series)):
-                outputs.append(
-                    {
-                        "type": "html",
-                        "html": value.to_html(
-                            border=0,
-                            classes="data-frame",
-                            max_rows=40,
-                            max_cols=12,
-                            notebook=False,
-                        ),
-                    }
-                )
-                return
-        except Exception:
-            pass
+        if "matplotlib" in sys.modules:
+            try:
+                from matplotlib.figure import Figure
+                from matplotlib.artist import Artist
 
-        try:
-            from matplotlib.figure import Figure
-            from matplotlib.artist import Artist
-
-            if isinstance(value, Figure):
-                save_figure(value)
-                return
-            if isinstance(value, Artist):
-                return
-        except Exception:
-            pass
+                if isinstance(value, Figure):
+                    save_figure(value)
+                    return
+                if isinstance(value, Artist):
+                    return
+            except Exception:
+                pass
 
         outputs.append({"type": "text", "text": html.escape(repr(value))})
 
@@ -179,13 +199,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             exec(compile(tree, str(code_path), "exec"), namespace)
 
-        try:
-            import matplotlib.pyplot as plt
-
-            for number in plt.get_fignums():
-                save_figure(plt.figure(number))
-        except Exception:
-            pass
+        plt = sys.modules.get("matplotlib.pyplot")
+        if plt is not None:
+            try:
+                for number in plt.get_fignums():
+                    save_figure(plt.figure(number))
+            except Exception:
+                pass
 
         result_path.write_text(json.dumps({"outputs": outputs}, ensure_ascii=False), encoding="utf-8")
         return 0

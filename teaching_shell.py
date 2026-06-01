@@ -773,6 +773,55 @@ def runner_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+# Imports matplotlib + pandas and builds matplotlib's font cache once, so the
+# slow one-time work happens in the background right after launch (while the
+# teacher is still introducing the lesson) instead of stalling a student's
+# first plot for minutes on an old PC.
+WARMUP_CODE = (
+    "import matplotlib\n"
+    "matplotlib.use('Agg')\n"
+    "import matplotlib.pyplot as plt\n"
+    "from matplotlib import font_manager\n"
+    "import pandas\n"
+    "fig = plt.figure()\n"
+    "plt.plot([0, 1], [0, 1])\n"
+    "import io\n"
+    "fig.savefig(io.BytesIO(), format='png')\n"
+)
+
+
+def warmup_runtime(version: str) -> None:
+    python_path = runtime_path(version)
+    if not python_path.exists():
+        return
+    try:
+        subprocess.run(
+            [str(python_path), "-c", WARMUP_CODE],
+            cwd=BASE_DIR,
+            env=runner_environment(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=TIMEOUT_SECONDS * 6,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        # Best-effort: if warmup fails or times out, the first real plot simply
+        # pays the build cost as before; nothing breaks.
+        pass
+
+
+def warmup_runtimes(versions: tuple[str, ...] = ("3.7", "3.12")) -> None:
+    for version in versions:
+        if runtime_compatibility_error(version):
+            continue
+        warmup_runtime(version)
+
+
+def warmup_runtimes_in_background() -> None:
+    thread = threading.Thread(target=warmup_runtimes, daemon=True)
+    thread.start()
+
+
 def read_result_outputs(result_path: Path) -> list[dict]:
     if not result_path.exists():
         return []
@@ -1250,6 +1299,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PYTHONTEACHING_PORT", "8765")))
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--warmup", action="store_true",
+                        help="预先构建字体缓存后退出（制作 U 盘时跑一次，让课堂首图更快）")
+    parser.add_argument("--no-warmup", action="store_true",
+                        help="启动时不在后台预热运行时")
     args = parser.parse_args(argv)
 
     OUTPUT_ROOT.mkdir(exist_ok=True)
@@ -1258,6 +1311,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_test:
         return self_test()
+
+    if args.warmup:
+        print("Warming up runtimes (building matplotlib font cache)...", flush=True)
+        warmup_runtimes()
+        print("Warmup done.", flush=True)
+        return 0
 
     port = available_port(args.host, args.port)
     httpd = PortableThreadingHTTPServer((args.host, port), Handler)
@@ -1270,6 +1329,11 @@ def main(argv: list[str] | None = None) -> int:
         timer = threading.Timer(0.8, webbrowser.open, args=(url,))
         timer.daemon = True
         timer.start()
+
+    if not args.no_warmup:
+        # Front-load matplotlib's one-time font-cache build in the background so
+        # the first plot of the lesson is fast instead of stalling for minutes.
+        warmup_runtimes_in_background()
 
     try:
         httpd.serve_forever()

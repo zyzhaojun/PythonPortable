@@ -60,6 +60,18 @@ PythonPortable/
 通过 `.gitignore` 排除，发布时随 U 盘 / 离线包分发。要得到可运行的 U 盘，
 需把 `runtimes/python37`、`runtimes/python312` 下的解释器与 `Lib/site-packages` 补齐。
 
+## 性能 / 启动速度
+
+为解决老机房电脑首次运行卡顿（曾长达 5 分钟）的问题：
+
+- **重型库懒加载**：`runner.py` 不再每次运行都加载 matplotlib/pandas。只有代码里出现
+  `matplotlib`/`pylab`/`seaborn` 时才配置字体；pandas/matplotlib 仅在学生代码自己导入后，
+  才在 `display()` 与图像收集里通过 `sys.modules` 引用。print/input/循环等课程因此秒开。
+- **后台预热**：`teaching_shell.py` 启动后在后台对各运行时预建 matplotlib 字体缓存
+  （`warmup_runtimes_in_background`），把一次性的慢操作放到老师讲解阶段完成，使第一张图也不卡；
+  缓存持久化在 `matplotlib_cache/`，跨会话/同版本复用。可用 `--no-warmup` 关闭。
+- **制作 U 盘时预热一次**：`teaching_shell.py --warmup` 会建好字体缓存后退出，随 U 盘带走。
+
 ## 本地自检
 
 在已装好运行时的目录下：
@@ -69,3 +81,9 @@ runtimes\python37\python.exe teaching_shell.py --self-test
 ```
 
 会用两套运行时各跑一段导入 pandas 的代码，输出 OK / FAILED。
+
+预热（制作 U 盘时跑一次，让课堂首次画图最快）：
+
+```bat
+runtimes\python37\python.exe teaching_shell.py --warmup
+```

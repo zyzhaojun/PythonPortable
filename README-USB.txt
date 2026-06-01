@@ -32,6 +32,16 @@
 - matplotlib 已配置中文字体，图表中文不会乱码。
 - 每次运行产生的临时文件放在 run_outputs\ 下，会在会话结束和下次启动时自动清理，不会越积越多。
 
+加载速度（老机器很重要）
+------------------------
+- 不用绘图的代码（print、input、循环、字符串、列表等）现在不会加载 pandas / matplotlib，
+  在老机器和慢速 U 盘上也能秒级运行。只有真正用到 matplotlib / pandas 的代码才会加载对应库。
+- 第一次画图时 matplotlib 需要建立字体缓存（较慢，仅一次）。本程序在启动后会自动在后台预热，
+  趁老师讲解时把缓存建好，让课堂上第一张图也不卡。缓存保存在 matplotlib_cache\，下次直接复用。
+- 制作 U 盘时，建议先在一台电脑上预热一次（把字体缓存随 U 盘一起带走，课堂首次画图最快）：
+      runtimes\python37\python.exe teaching_shell.py --warmup
+  这条命令会建好缓存后自动退出，不会启动网页。
+
 机房部署提示（杀毒 / SmartScreen）
 ----------------------------------
 - 部分机房安全软件或 Windows SmartScreen 会拦截「从 U 盘运行的 .bat 调起 python.exe」。
