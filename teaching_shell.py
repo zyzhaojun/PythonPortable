@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import mimetypes
@@ -179,6 +180,7 @@ HTML_PAGE = r"""<!doctype html>
     .actions {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 8px;
     }
     button.command {
@@ -232,24 +234,61 @@ HTML_PAGE = r"""<!doctype html>
       user-select: none;
       border-right: 1px solid var(--code-line);
     }
-    .editor {
+    .editor-host {
+      position: relative;
       flex: 1;
+      min-width: 0;
       min-height: 0;
-      width: 100%;
-      resize: none;
-      border: 0;
+      overflow: hidden;
+    }
+    pre.highlight {
+      position: absolute;
+      inset: 0;
+      margin: 0;
       padding: 14px 16px;
+      border: 0;
+      border-radius: 0;
       background: var(--code);
       color: var(--code-text);
       font: 15px/1.55 Consolas, "Cascadia Mono", "Courier New", monospace;
+      tab-size: 4;
+      white-space: pre;
+      word-break: normal;
+      overflow: auto;
+      pointer-events: none;
+      z-index: 0;
+    }
+    pre.highlight::-webkit-scrollbar { width: 0; height: 0; }
+    .editor {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      resize: none;
+      border: 0;
+      padding: 14px 16px;
+      background: transparent;
+      color: transparent;
+      font: 15px/1.55 Consolas, "Cascadia Mono", "Courier New", monospace;
       outline: none;
       tab-size: 4;
+      white-space: pre;
+      overflow: auto;
       caret-color: #007acc;
+      z-index: 1;
     }
     .editor::selection {
       background: var(--selection);
       color: #1e1e1e;
     }
+    /* Python 语法着色（VS Code 浅色风格） */
+    .tok-kw { color: #0000ff; }
+    .tok-str { color: #a31515; }
+    .tok-com { color: #008000; font-style: italic; }
+    .tok-num { color: #098658; }
+    .tok-fn { color: #795e26; }
+    .tok-bi { color: #267f99; }
     .output {
       flex: 1;
       min-height: 0;
@@ -381,13 +420,20 @@ HTML_PAGE = r"""<!doctype html>
       <div class="pane-head">
         <div class="pane-title">代码</div>
         <div class="actions">
+          <button id="openBtn" type="button" class="secondary">打开</button>
+          <button id="saveBtn" type="button" class="secondary">保存</button>
+          <button id="dataBtn" type="button" class="secondary">数据</button>
           <button id="clearBtn" type="button" class="secondary">清空</button>
           <button id="runBtn" type="button" class="command">运行</button>
+          <input id="openFile" type="file" accept=".py,.txt" hidden>
+          <input id="dataFile" type="file" accept=".xlsx,.xls,.csv" hidden>
         </div>
       </div>
       <div class="editor-wrap">
         <div id="gutter" class="gutter" aria-hidden="true">1</div>
-        <textarea id="code" class="editor" spellcheck="false">import sys
+        <div class="editor-host">
+          <pre id="highlight" class="highlight" aria-hidden="true"></pre>
+          <textarea id="code" class="editor" spellcheck="false">import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -405,6 +451,7 @@ plt.ylabel("y")
 a = int(input("请输入第一个整数："))
 b = int(input("请输入第二个整数："))
 print("两个整数的和是：", a + b)</textarea>
+        </div>
       </div>
     </section>
 
@@ -422,9 +469,15 @@ print("两个整数的和是：", a + b)</textarea>
   <script>
     const codeEl = document.getElementById("code");
     const gutterEl = document.getElementById("gutter");
+    const highlightEl = document.getElementById("highlight");
     const outputEl = document.getElementById("output");
     const runBtn = document.getElementById("runBtn");
     const clearBtn = document.getElementById("clearBtn");
+    const openBtn = document.getElementById("openBtn");
+    const saveBtn = document.getElementById("saveBtn");
+    const dataBtn = document.getElementById("dataBtn");
+    const openFile = document.getElementById("openFile");
+    const dataFile = document.getElementById("dataFile");
     const runState = document.getElementById("runState");
     const runtimeStatus = document.getElementById("runtimeStatus");
     const versionButtons = Array.from(document.querySelectorAll("[data-version]"));
@@ -433,6 +486,59 @@ print("两个整数的和是：", a + b)</textarea>
     let interactiveSessionId = null;
     let pollTimer = null;
     let lastTerminalStdout = "";
+
+    const PY_KEYWORDS = new Set(["False","None","True","and","as","assert","async","await","break","class","continue","def","del","elif","else","except","finally","for","from","global","if","import","in","is","lambda","nonlocal","not","or","pass","raise","return","try","while","with","yield","match","case"]);
+    const PY_BUILTINS = new Set(["print","input","len","range","int","float","str","list","dict","set","tuple","bool","abs","sum","min","max","sorted","reversed","enumerate","zip","map","filter","open","type","round","repr","format","display","pd","plt","np","read_excel","read_csv"]);
+    // One regex pass: comments, strings (triple/normal), numbers, identifiers.
+    const PY_TOKEN = /(#[^\n]*)|("{3}[\s\S]*?"{3}|'{3}[\s\S]*?'{3}|"(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?)|(\b\d+\.?\d*(?:[eE][+-]?\d+)?\b)|([A-Za-z_]\w*)/g;
+
+    function escapeHtml(text) {
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function highlightPython(code) {
+      let out = "";
+      let last = 0;
+      let prevWord = "";
+      let m;
+      PY_TOKEN.lastIndex = 0;
+      while ((m = PY_TOKEN.exec(code)) !== null) {
+        out += escapeHtml(code.slice(last, m.index));
+        if (m[1] !== undefined) {
+          out += '<span class="tok-com">' + escapeHtml(m[0]) + "</span>";
+          prevWord = "";
+        } else if (m[2] !== undefined) {
+          out += '<span class="tok-str">' + escapeHtml(m[0]) + "</span>";
+          prevWord = "";
+        } else if (m[3] !== undefined) {
+          out += '<span class="tok-num">' + escapeHtml(m[0]) + "</span>";
+          prevWord = "";
+        } else {
+          const word = m[0];
+          let cls = "";
+          if (PY_KEYWORDS.has(word)) cls = "tok-kw";
+          else if (prevWord === "def" || prevWord === "class") cls = "tok-fn";
+          else if (PY_BUILTINS.has(word)) cls = "tok-bi";
+          out += cls ? '<span class="' + cls + '">' + escapeHtml(word) + "</span>" : escapeHtml(word);
+          prevWord = word;
+        }
+        last = PY_TOKEN.lastIndex;
+        if (m.index === PY_TOKEN.lastIndex) PY_TOKEN.lastIndex += 1;
+      }
+      out += escapeHtml(code.slice(last));
+      return out + "\n";
+    }
+
+    function updateHighlight() {
+      highlightEl.innerHTML = highlightPython(codeEl.value);
+      syncScroll();
+    }
+
+    function syncScroll() {
+      highlightEl.scrollTop = codeEl.scrollTop;
+      highlightEl.scrollLeft = codeEl.scrollLeft;
+      gutterEl.scrollTop = codeEl.scrollTop;
+    }
 
     function updateGutter() {
       const lineCount = codeEl.value.split("\n").length || 1;
@@ -689,18 +795,18 @@ print("两个整数的和是：", a + b)</textarea>
       await stopCurrentSession();
       codeEl.value = "";
       saveDraft();
+      updateHighlight();
       updateGutter();
       outputEl.innerHTML = '<div class="empty">输出会显示在这里</div>';
       runState.textContent = "等待运行";
       runBtn.disabled = false;
     });
     codeEl.addEventListener("input", () => {
+      updateHighlight();
       updateGutter();
       saveDraft();
     });
-    codeEl.addEventListener("scroll", () => {
-      gutterEl.scrollTop = codeEl.scrollTop;
-    });
+    codeEl.addEventListener("scroll", syncScroll);
     codeEl.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();
@@ -712,12 +818,75 @@ print("两个整数的和是：", a + b)</textarea>
         const end = codeEl.selectionEnd;
         codeEl.value = `${codeEl.value.slice(0, start)}    ${codeEl.value.slice(end)}`;
         codeEl.selectionStart = codeEl.selectionEnd = start + 4;
+        updateHighlight();
         updateGutter();
         saveDraft();
       }
     });
 
+    // 打开 .py 文件到编辑器
+    openBtn.addEventListener("click", () => openFile.click());
+    openFile.addEventListener("change", () => {
+      const file = openFile.files && openFile.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        codeEl.value = String(reader.result || "");
+        updateHighlight();
+        updateGutter();
+        saveDraft();
+      };
+      reader.readAsText(file);
+      openFile.value = "";
+    });
+
+    // 保存当前代码为 .py 文件
+    saveBtn.addEventListener("click", () => {
+      const blob = new Blob([codeEl.value], { type: "text/x-python;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "lesson.py";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+
+    // 打开数据文件（.xlsx/.csv）：上传到本地服务，供 pandas 读取
+    dataBtn.addEventListener("click", () => dataFile.click());
+    dataFile.addEventListener("change", () => {
+      const file = dataFile.files && dataFile.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const dataUrl = String(reader.result || "");
+        const base64 = dataUrl.includes(",") ? dataUrl.slice(dataUrl.indexOf(",") + 1) : "";
+        try {
+          const response = await fetch("/upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: file.name, content: base64 })
+          });
+          const data = await response.json();
+          outputEl.replaceChildren();
+          if (data.ok) {
+            const reader2 = file.name.toLowerCase().endsWith(".csv") ? "read_csv" : "read_excel";
+            appendPre(`已加载数据文件：${data.name}\n在代码中这样读取：\n    import pandas as pd\n    df = pd.${reader2}("${data.name}")`, "feedback");
+          } else {
+            appendPre(data.stderr || "数据文件上传失败。", "stderr");
+          }
+        } catch (error) {
+          outputEl.replaceChildren();
+          appendPre(`数据文件上传失败：${error.message}`, "stderr");
+        }
+      };
+      reader.readAsDataURL(file);
+      dataFile.value = "";
+    });
+
     restoreDraft();
+    updateHighlight();
     updateGutter();
     setVersion(currentVersion);
   </script>
@@ -1060,6 +1229,38 @@ def start_interactive_run(version: str, code: str) -> dict:
     return {"ok": True, "session_id": run_id, "version": normalized}
 
 
+ALLOWED_DATA_SUFFIXES = {".xlsx", ".xls", ".csv", ".txt", ".json", ".tsv"}
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def save_uploaded_data(name: str, content_b64: str) -> tuple[int, dict]:
+    safe_name = Path(str(name)).name.strip()
+    if not safe_name:
+        return 400, {"ok": False, "stderr": "文件名无效。"}
+    if Path(safe_name).suffix.lower() not in ALLOWED_DATA_SUFFIXES:
+        allowed = " ".join(sorted(ALLOWED_DATA_SUFFIXES))
+        return 400, {"ok": False, "stderr": f"只支持这些数据文件类型：{allowed}"}
+    try:
+        raw = base64.b64decode(content_b64 or "", validate=False)
+    except Exception:
+        return 400, {"ok": False, "stderr": "文件内容解码失败。"}
+    if len(raw) > MAX_UPLOAD_BYTES:
+        return 400, {"ok": False, "stderr": "数据文件过大（上限 25 MB）。"}
+
+    # The runner runs with cwd=BASE_DIR, so saving the file directly into
+    # BASE_DIR lets students read it with just its name, e.g.
+    # pd.read_csv("data.csv"). Restrict the destination to BASE_DIR.
+    try:
+        target = safe_child_path(BASE_DIR, BASE_DIR / safe_name)
+    except FileNotFoundError:
+        return 400, {"ok": False, "stderr": "文件名无效。"}
+    try:
+        target.write_bytes(raw)
+    except OSError as exc:
+        return 500, {"ok": False, "stderr": f"保存数据文件失败：{exc}"}
+    return 200, {"ok": True, "name": safe_name}
+
+
 def get_session(session_id: str) -> dict | None:
     with SESSIONS_LOCK:
         return SESSIONS.get(session_id)
@@ -1261,6 +1462,11 @@ class Handler(BaseHTTPRequestHandler):
                 str(payload.get("stdin", payload.get("input", ""))),
             )
             self.send_json(200, result)
+            return
+
+        if path == "/upload":
+            status, result = save_uploaded_data(payload.get("name", ""), payload.get("content", ""))
+            self.send_json(status, result)
             return
 
         self.send_error(404)
