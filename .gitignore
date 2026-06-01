@@ -1,0 +1,16 @@
+# 运行时生成的临时目录（每次运行的输出、字体缓存）
+run_outputs/
+matplotlib_cache/
+
+# 嵌入式 Python 运行时与第三方库（二进制大文件，随 U 盘/离线包分发，不入库）
+runtimes/python37/**
+runtimes/python312/**
+# 但保留嵌入式解释器的路径配置文件，作为版本记录
+!runtimes/python37/
+!runtimes/python312/
+!runtimes/python37/python37._pth
+!runtimes/python312/python312._pth
+
+# 常见二进制/缓存
+*.pyc
+__pycache__/
